@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bist-orderbook-analysis"
+version = "0.1.0"
+description = "PCAP-based order book analysis for BIST equity and derivatives markets"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Serdar Temel" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.5",
+]
+pcap = [
+  "dpkt>=1.9.8",
+]
+analysis = [
+  "matplotlib>=3.9",
+  "pandas>=2.2",
+]
+ui = [
+  "streamlit>=1.36",
+]
+
+[project.scripts]
+bist-orderbook = "bist_orderbook.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bist_orderbook"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
