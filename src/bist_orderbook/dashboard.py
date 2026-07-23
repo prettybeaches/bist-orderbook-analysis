@@ -95,6 +95,21 @@ def downsample_observations(
     return tuple(observations[index] for index in indices)
 
 
+def nearest_hover_parameter(name: str, field: str) -> dict[str, object]:
+    """Build a stable nearest-value hover selection for layered Vega-Lite charts."""
+
+    return {
+        "name": name,
+        "select": {
+            "type": "point",
+            "fields": [field],
+            "nearest": True,
+            "on": "pointermove",
+            "clear": "pointerleave",
+        },
+    }
+
+
 def price_chart_rows(
     analysis: PairAnalysis, mode: str = "normalized"
 ) -> list[dict[str, object]]:

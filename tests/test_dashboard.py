@@ -18,6 +18,7 @@ from bist_orderbook.dashboard import (
     database_status,
     downsample_observations,
     lag_chart_rows,
+    nearest_hover_parameter,
     price_chart_rows,
     snapshot_table,
     timeline_index_at_or_before,
@@ -116,6 +117,12 @@ class DashboardHelperTest(unittest.TestCase):
         self.assertEqual(len(sampled), 3)
         self.assertEqual(sampled[0], observations[0])
         self.assertEqual(sampled[-1], observations[-1])
+
+    def test_hover_selection_uses_non_bubbling_pointer_events(self) -> None:
+        parameter = nearest_hover_parameter("hover_price", "time")
+        selection = parameter["select"]
+        self.assertEqual(selection["on"], "pointermove")
+        self.assertEqual(selection["clear"], "pointerleave")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@ A PCAP-based data pipeline that replays BIST market data, reconstructs 10-level 
 equity and derivatives instruments, stores queryable snapshots, and analyzes related spot/futures
 pairs.
 
+Current release: **v0.2.1 “Steady Pulse”**
+
 ## Project scope
 
 - Parse BIST ITCH messages carried in PCAP packets.
@@ -140,6 +142,16 @@ Measured before/after timings and correctness checks are documented in
 5. Configure spot/futures symbol pairs and generate analysis reports.
 6. Explore reconstructed books and pair analysis through a Streamlit UI.
 7. Validate correctness, sequence gaps, and performance on the complete capture.
+
+## Versioning
+
+Releases follow semantic versioning and use a memorable release name:
+
+```text
+vMAJOR.MINOR.PATCH “Version Name” — Short Release Summary
+```
+
+Patch releases retain a focused name that describes the improvement or fix.
 
 ## Data layout
 

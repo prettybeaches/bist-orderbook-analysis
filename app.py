@@ -31,6 +31,7 @@ from bist_orderbook.dashboard import (
     downsample_observations,
     lag_chart_rows,
     momentum_chart_rows,
+    nearest_hover_parameter,
     price_chart_rows,
     snapshot_table,
     timeline_index_at_or_before,
@@ -215,18 +216,7 @@ def line_chart(
                 },
                 {
                     "mark": {"type": "point", "opacity": 0},
-                    "params": [
-                        {
-                            "name": hover_name,
-                            "select": {
-                                "type": "point",
-                                "fields": [x],
-                                "nearest": True,
-                                "on": "pointerover",
-                                "clear": "pointerout",
-                            },
-                        }
-                    ],
+                    "params": [nearest_hover_parameter(hover_name, x)],
                     "encoding": {"tooltip": tooltip},
                 },
                 {
@@ -284,18 +274,7 @@ def lag_chart(data, *, height: int, fixed_scale: bool) -> None:
                 },
                 {
                     "mark": {"type": "point", "opacity": 0},
-                    "params": [
-                        {
-                            "name": "lag_hover",
-                            "select": {
-                                "type": "point",
-                                "fields": ["lag_seconds"],
-                                "nearest": True,
-                                "on": "pointerover",
-                                "clear": "pointerout",
-                            },
-                        }
-                    ],
+                    "params": [nearest_hover_parameter("lag_hover", "lag_seconds")],
                     "encoding": {"y": y_encoding, "tooltip": tooltip},
                 },
                 {

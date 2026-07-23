@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bist-orderbook-analysis"
-version = "0.1.0"
+version = "0.2.1"
 description = "PCAP-based order book analysis for BIST equity and derivatives markets"
 readme = "README.md"
 requires-python = ">=3.11"
