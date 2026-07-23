@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ruff: noqa: E402
@@ -14,15 +16,24 @@ if str(SOURCE_ROOT) not in sys.path:
 
 import streamlit as st
 
-from bist_orderbook.analysis import analyze_pair, load_symbol_pairs, summary_row
+from bist_orderbook.analysis import (
+    PairAnalysis,
+    analyze_top_of_books,
+    calculate_lag_correlations,
+    load_symbol_pairs,
+    summary_row,
+)
+from bist_orderbook.analysis_cache import load_cached_top_of_book
 from bist_orderbook.dashboard import (
     analysis_csv,
     basis_chart_rows,
     database_status,
+    downsample_observations,
     lag_chart_rows,
     momentum_chart_rows,
     price_chart_rows,
     snapshot_table,
+    timeline_index_at_or_before,
 )
 from bist_orderbook.query import SnapshotQuery, parse_time_ns, query_snapshots
 from bist_orderbook.storage import SQLiteStore
@@ -37,9 +48,27 @@ def cached_pairs(path: str):
 
 
 @st.cache_data(show_spinner=False)
-def cached_status(path: str, modified_ns: int):
+def cached_status(path: str, modified_ns: int, include_price_level_count: bool):
     del modified_ns
-    return database_status(path)
+    return database_status(path, include_price_level_count=include_price_level_count)
+
+
+@st.cache_data(
+    show_spinner="Loading optimized top-of-book data...",
+    max_entries=80,
+)
+def cached_top_of_book(
+    database: str,
+    database_modified_ns: int,
+    order_book_id: int,
+    interval_ms: int,
+):
+    return load_cached_top_of_book(
+        database,
+        database_modified_ns=database_modified_ns,
+        order_book_id=order_book_id,
+        interval_ms=interval_ms,
+    )
 
 
 @st.cache_data(show_spinner="Aligning spot and futures books...")
@@ -52,10 +81,22 @@ def cached_analysis(
     momentum_periods: int,
     max_lag_steps: int,
 ):
-    del database_modified_ns
-    return analyze_pair(
-        SQLiteStore(database),
+    spot = cached_top_of_book(
+        database,
+        database_modified_ns,
+        pair.spot_order_book_id,
+        interval_ms,
+    )
+    future = cached_top_of_book(
+        database,
+        database_modified_ns,
+        pair.future_order_book_id,
+        interval_ms,
+    )
+    return analyze_top_of_books(
         pair,
+        spot,
+        future,
         interval_ms=interval_ms,
         max_staleness_ms=max_staleness_ms,
         momentum_periods=momentum_periods,
@@ -63,24 +104,207 @@ def cached_analysis(
     )
 
 
-def line_chart(data, *, x: str, y: str, color: str | None, y_title: str) -> None:
-    encoding = {
-        "x": {"field": x, "type": "temporal", "title": "Time (UTC)"},
-        "y": {"field": y, "type": "quantitative", "title": y_title, "scale": {"zero": False}},
-        "tooltip": [
-            {"field": x, "type": "temporal", "title": "Time"},
-            {"field": y, "type": "quantitative", "title": y_title, "format": ".4f"},
-        ],
+def _wide_chart_rows(
+    data: list[dict[str, object]], *, x: str, y: str, color: str | None, y_title: str
+) -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
+    series_names = list(dict.fromkeys(str(row[color]) for row in data)) if color else [y_title]
+    series_fields = [(name, f"value_{index}") for index, name in enumerate(series_names)]
+    field_by_series = dict(series_fields)
+    rows_by_x: dict[object, dict[str, object]] = {}
+    for row in data:
+        x_value = row[x]
+        wide_row = rows_by_x.setdefault(x_value, {x: x_value})
+        series_name = str(row[color]) if color else y_title
+        wide_row[field_by_series[series_name]] = row[y]
+    for wide_row in rows_by_x.values():
+        wide_row["hover_values"] = " · ".join(
+            f"{name}: {float(wide_row[field]):.6f}"
+            for name, field in series_fields
+            if field in wide_row
+        )
+    return list(rows_by_x.values()), series_fields
+
+
+def line_chart(
+    data,
+    *,
+    chart_key: str,
+    x: str,
+    y: str,
+    color: str | None,
+    y_title: str,
+    height: int,
+    enable_zoom: bool,
+) -> None:
+    if not data:
+        st.info("No observations are available for the selected chart options.")
+        return
+    wide_rows, series_fields = _wide_chart_rows(
+        data, x=x, y=y, color=color, y_title=y_title
+    )
+    hover_name = f"hover_{chart_key}"
+    zoom_name = f"zoom_{chart_key}"
+    value_fields = [field for _, field in series_fields]
+    label_expression = " : ".join(
+        f"datum.series_key === {json.dumps(field)} ? {json.dumps(name)}"
+        for name, field in series_fields
+    )
+    label_expression = f"{label_expression} : datum.series_key"
+    folded_transform = [
+        {"fold": value_fields, "as": ["series_key", "chart_value"]},
+        {"calculate": label_expression, "as": "series"},
+    ]
+    x_encoding = {
+        "field": x,
+        "type": "temporal",
+        "title": "Time (UTC)",
+        "axis": {"grid": True, "labelOverlap": "greedy", "tickCount": 8},
+    }
+    value_encoding = {
+        "field": "chart_value",
+        "type": "quantitative",
+        "title": y_title,
+        "scale": {"zero": False},
+        "axis": {"grid": True},
+    }
+    line_encoding = {"y": value_encoding}
+    point_encoding = {
+        **line_encoding,
+        "opacity": {
+            "condition": {"param": hover_name, "empty": False, "value": 1},
+            "value": 0,
+        },
     }
     if color:
-        encoding["color"] = {"field": color, "type": "nominal", "title": None}
-        encoding["tooltip"].insert(1, {"field": color, "type": "nominal", "title": "Series"})
+        color_encoding = {
+            "field": "series",
+            "type": "nominal",
+            "title": None,
+            "sort": [name for name, _ in series_fields],
+        }
+        line_encoding["color"] = color_encoding
+        point_encoding["color"] = color_encoding
+    tooltip = [
+        {
+            "field": x,
+            "type": "temporal",
+            "title": "Time",
+            "format": "%Y-%m-%d %H:%M:%S",
+        },
+        {"field": "hover_values", "type": "nominal", "title": "Values"},
+    ]
+    params = []
+    if enable_zoom:
+        params.append(
+            {
+                "name": zoom_name,
+                "select": {"type": "interval", "encodings": ["x"]},
+                "bind": "scales",
+            }
+        )
+    st.vega_lite_chart(
+        spec={
+            "data": {"values": wide_rows},
+            "encoding": {"x": x_encoding},
+            "layer": [
+                {
+                    "transform": folded_transform,
+                    "params": params,
+                    "mark": {"type": "line", "strokeWidth": 2},
+                    "encoding": line_encoding,
+                },
+                {
+                    "mark": {"type": "point", "opacity": 0},
+                    "params": [
+                        {
+                            "name": hover_name,
+                            "select": {
+                                "type": "point",
+                                "fields": [x],
+                                "nearest": True,
+                                "on": "pointerover",
+                                "clear": "pointerout",
+                            },
+                        }
+                    ],
+                    "encoding": {"tooltip": tooltip},
+                },
+                {
+                    "transform": [
+                        *folded_transform,
+                        {"filter": {"param": hover_name, "empty": False}},
+                    ],
+                    "mark": {"type": "point", "size": 60},
+                    "encoding": point_encoding,
+                },
+                {
+                    "transform": [{"filter": {"param": hover_name, "empty": False}}],
+                    "mark": {"type": "rule"},
+                    "encoding": {"tooltip": tooltip},
+                },
+            ],
+            "height": height,
+        },
+        width="stretch",
+        key=f"chart_{chart_key}",
+    )
+
+
+def lag_chart(data, *, height: int, fixed_scale: bool) -> None:
+    if not data:
+        st.info("No lead-lag observations are available.")
+        return
+    correlation_scale = {"domain": [-1, 1]} if fixed_scale else {"zero": True}
+    x_encoding = {
+        "field": "lag_seconds",
+        "type": "quantitative",
+        "title": "Lag (seconds)",
+        "axis": {"grid": True, "tickMinStep": 1},
+    }
+    y_encoding = {
+        "field": "correlation",
+        "type": "quantitative",
+        "title": "Correlation",
+        "scale": correlation_scale,
+        "axis": {"grid": True},
+    }
+    tooltip = [
+        {"field": "lag_seconds", "title": "Lag (seconds)"},
+        {"field": "correlation", "title": "Correlation", "format": ".6f"},
+        {"field": "observations", "title": "Observations"},
+    ]
     st.vega_lite_chart(
         spec={
             "data": {"values": data},
-            "mark": {"type": "line", "strokeWidth": 2},
-            "encoding": encoding,
-            "height": 300,
+            "encoding": {"x": x_encoding},
+            "layer": [
+                {
+                    "mark": {"type": "bar"},
+                    "encoding": {"y": y_encoding, "tooltip": tooltip},
+                },
+                {
+                    "mark": {"type": "point", "opacity": 0},
+                    "params": [
+                        {
+                            "name": "lag_hover",
+                            "select": {
+                                "type": "point",
+                                "fields": ["lag_seconds"],
+                                "nearest": True,
+                                "on": "pointerover",
+                                "clear": "pointerout",
+                            },
+                        }
+                    ],
+                    "encoding": {"y": y_encoding, "tooltip": tooltip},
+                },
+                {
+                    "transform": [{"filter": {"param": "lag_hover", "empty": False}}],
+                    "mark": {"type": "rule"},
+                    "encoding": {"tooltip": tooltip},
+                },
+            ],
+            "height": height,
         },
         width="stretch",
     )
@@ -92,10 +316,16 @@ def render_book(snapshot, heading: str) -> None:
         st.info("No snapshot is available for this instrument.")
         return
     st.caption(
-        f"Sequence {snapshot.sequence_number:,} · {snapshot.timestamp.isoformat()} · "
+        f"Sequence {snapshot.sequence_number:,} · {format_timestamp_ns(snapshot.timestamp_ns)} · "
         f"Book {snapshot.order_book_id}"
     )
     st.dataframe(snapshot_table(snapshot), hide_index=True, width="stretch")
+
+
+def format_timestamp_ns(timestamp_ns: int) -> str:
+    seconds, nanoseconds = divmod(timestamp_ns, 1_000_000_000)
+    timestamp = datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{timestamp}.{nanoseconds:09d}Z"
 
 
 def render_dashboard(database: Path, pairs_path: Path) -> None:
@@ -117,6 +347,7 @@ def render_dashboard(database: Path, pairs_path: Path) -> None:
     )
     momentum_periods = st.sidebar.slider("Momentum periods", 1, 30, 5)
     max_lag_steps = st.sidebar.slider("Maximum lead-lag steps", 1, 20, 5)
+    analysis_scope = f"{pair.name}_{interval_ms}_{max_staleness_ms}_{momentum_periods}"
 
     modified_ns = database.stat().st_mtime_ns
     analysis = cached_analysis(
@@ -140,12 +371,108 @@ def render_dashboard(database: Path, pairs_path: Path) -> None:
         "—" if summary["return_correlation"] is None else f'{summary["return_correlation"]:.3f}',
     )
 
+    st.subheader("Order-book snapshots")
+    snapshot_mode = st.radio(
+        "Snapshot selection",
+        ("Latest populated", "Latest event", "Analysis timeline"),
+        horizontal=True,
+        help=(
+            "Latest populated skips closing book-flush events. Latest event includes empty "
+            "snapshots. Analysis timeline lets you inspect both books across the trading day."
+        ),
+    )
+    snapshot_end_ns = None
+    populated_only = snapshot_mode != "Latest event"
+    if snapshot_mode == "Analysis timeline":
+        if analysis.observations:
+            timeline_timestamps = [item.timestamp_ns for item in analysis.observations]
+            timeline_scope = analysis_scope
+            timeline_slider_key = f"timeline_index_{timeline_scope}"
+            timeline_target_key = f"timeline_target_{timeline_scope}"
+            if timeline_slider_key not in st.session_state:
+                st.session_state[timeline_slider_key] = len(timeline_timestamps) - 1
+            if timeline_target_key not in st.session_state:
+                st.session_state[timeline_target_key] = timeline_timestamps[-1]
+
+            search_columns = st.columns([4, 1], vertical_alignment="bottom")
+            timestamp_search = search_columns[0].text_input(
+                "Go to timestamp",
+                placeholder="2026-04-27T15:10:00.115343327+00:00 or Unix nanoseconds",
+                key=f"timeline_search_{timeline_scope}",
+                help=(
+                    "The books shown are the latest snapshots at or before this timestamp. "
+                    "ISO-8601 values must include a UTC offset."
+                ),
+            )
+            if search_columns[1].button(
+                "Go",
+                key=f"timeline_go_{timeline_scope}",
+                type="primary",
+                width="stretch",
+            ):
+                try:
+                    requested_ns = parse_time_ns(timestamp_search)
+                except ValueError as error:
+                    st.error(str(error))
+                else:
+                    st.session_state[timeline_slider_key] = timeline_index_at_or_before(
+                        timeline_timestamps, requested_ns
+                    )
+                    st.session_state[timeline_target_key] = requested_ns
+
+            def update_timeline_target() -> None:
+                selected_index = st.session_state[timeline_slider_key]
+                st.session_state[timeline_target_key] = timeline_timestamps[selected_index]
+
+            timeline_index = st.slider(
+                "Timeline position",
+                min_value=0,
+                max_value=len(analysis.observations) - 1,
+                key=timeline_slider_key,
+                on_change=update_timeline_target,
+                help="Select an aligned one-second observation from the analysis.",
+            )
+            include_empty = st.checkbox(
+                "Include empty snapshots",
+                value=False,
+                key=f"timeline_empty_{timeline_scope}",
+                help=(
+                    "When enabled, book-flush snapshots can be displayed. When disabled, "
+                    "the latest earlier snapshot containing price levels is shown."
+                ),
+            )
+            populated_only = not include_empty
+            snapshot_end_ns = int(st.session_state[timeline_target_key])
+            snapshot_description = "snapshots" if include_empty else "populated snapshots"
+            st.caption(
+                f"Showing the latest {snapshot_description} at or before "
+                f"{format_timestamp_ns(snapshot_end_ns)} "
+                f"(nearest timeline position {timeline_index + 1:,} of "
+                f"{len(analysis.observations):,})."
+            )
+        else:
+            st.info("No aligned observations are available for this pair.")
+
     store = SQLiteStore(database)
     spot_snapshot = query_snapshots(
-        store, SnapshotQuery(symbol=pair.spot_symbol, limit=1, latest=True)
+        store,
+        SnapshotQuery(
+            symbol=pair.spot_symbol,
+            end_ns=snapshot_end_ns,
+            limit=1,
+            latest=True,
+            populated_only=populated_only,
+        ),
     )
     future_snapshot = query_snapshots(
-        store, SnapshotQuery(symbol=pair.future_symbol, limit=1, latest=True)
+        store,
+        SnapshotQuery(
+            symbol=pair.future_symbol,
+            end_ns=snapshot_end_ns,
+            limit=1,
+            latest=True,
+            populated_only=populated_only,
+        ),
     )
     book_columns = st.columns(2)
     with book_columns[0]:
@@ -153,63 +480,163 @@ def render_dashboard(database: Path, pairs_path: Path) -> None:
     with book_columns[1]:
         render_book(future_snapshot[0] if future_snapshot else None, pair.future_symbol)
 
-    st.subheader("Normalized mid-price")
+    with st.expander("Chart display options", expanded=True):
+        chart_option_columns = st.columns(3)
+        price_display = chart_option_columns[0].selectbox(
+            "Price measure",
+            ("Normalized index", "Mid-price", "One-interval return"),
+        )
+        basis_display = chart_option_columns[1].selectbox(
+            "Basis measure",
+            ("Basis points", "Price difference"),
+        )
+        time_window = chart_option_columns[2].selectbox(
+            "Time window",
+            ("Full session", "Last 15 minutes", "Last 60 minutes", "Custom range"),
+        )
+        visible_series = st.multiselect(
+            "Visible instruments",
+            (pair.spot_symbol, pair.future_symbol),
+            default=(pair.spot_symbol, pair.future_symbol),
+        )
+        behavior_columns = st.columns(4)
+        point_limit_label = behavior_columns[0].selectbox(
+            "Maximum rendered points",
+            ("1,000", "2,500", "5,000", "All"),
+            index=1,
+            help=(
+                "Limits browser rendering only. Metrics, downloads, and lead-lag calculations "
+                "continue to use all observations."
+            ),
+        )
+        chart_height = behavior_columns[1].slider("Chart height", 240, 520, 320, 20)
+        enable_zoom = behavior_columns[2].checkbox(
+            "Enable horizontal zoom and pan",
+            value=True,
+            help="Drag across a chart to zoom into a time interval.",
+        )
+        fixed_correlation_scale = behavior_columns[3].checkbox(
+            "Fix correlation axis to −1…1",
+            value=True,
+        )
+
+        visible_observations = analysis.observations
+        if analysis.observations and time_window == "Last 15 minutes":
+            cutoff_ns = analysis.observations[-1].timestamp_ns - 15 * 60 * 1_000_000_000
+            visible_observations = tuple(
+                item for item in analysis.observations if item.timestamp_ns >= cutoff_ns
+            )
+        elif analysis.observations and time_window == "Last 60 minutes":
+            cutoff_ns = analysis.observations[-1].timestamp_ns - 60 * 60 * 1_000_000_000
+            visible_observations = tuple(
+                item for item in analysis.observations if item.timestamp_ns >= cutoff_ns
+            )
+        elif analysis.observations and time_window == "Custom range":
+            range_start, range_end = st.slider(
+                "Observation range",
+                min_value=0,
+                max_value=len(analysis.observations) - 1,
+                value=(0, len(analysis.observations) - 1),
+                key=f"chart_range_{analysis_scope}",
+            )
+            visible_observations = analysis.observations[range_start : range_end + 1]
+        if visible_observations:
+            st.caption(
+                f"{len(visible_observations):,} visible observations · "
+                f"{format_timestamp_ns(visible_observations[0].timestamp_ns)} to "
+                f"{format_timestamp_ns(visible_observations[-1].timestamp_ns)}"
+            )
+
+    visible_analysis = PairAnalysis(
+        pair=analysis.pair,
+        observations=tuple(visible_observations),
+        lag_correlations=calculate_lag_correlations(
+            tuple(visible_observations),
+            max_lag_steps=max_lag_steps,
+            interval_seconds=interval_ms / 1_000,
+        ),
+    )
+    point_limits = {"1,000": 1_000, "2,500": 2_500, "5,000": 5_000, "All": None}
+    rendered_observations = downsample_observations(
+        visible_analysis.observations,
+        point_limits[point_limit_label],
+    )
+    chart_analysis = PairAnalysis(
+        pair=visible_analysis.pair,
+        observations=rendered_observations,
+        lag_correlations=visible_analysis.lag_correlations,
+    )
+    if len(rendered_observations) < len(visible_analysis.observations):
+        st.caption(
+            f"Rendering {len(rendered_observations):,} of "
+            f"{len(visible_analysis.observations):,} observations. "
+            "Analytics and downloads remain full resolution."
+        )
+    price_modes = {
+        "Normalized index": ("normalized", "Normalized mid-price", "Index (window start = 100)"),
+        "Mid-price": ("mid_price", "Spot and futures mid-price", "Mid-price"),
+        "One-interval return": ("return", "One-interval return", "Return (%)"),
+    }
+    price_mode, price_heading, price_y_title = price_modes[price_display]
+    basis_unit = "bps" if basis_display == "Basis points" else "price"
+    basis_y_title = "Basis (bps)" if basis_unit == "bps" else "Futures − spot"
+
+    st.subheader(price_heading)
+    price_rows = [
+        row
+        for row in price_chart_rows(chart_analysis, price_mode)
+        if row["series"] in visible_series
+    ]
     line_chart(
-        price_chart_rows(analysis),
+        price_rows,
+        chart_key="price",
         x="time",
         y="value",
         color="series",
-        y_title="Index (first observation = 100)",
+        y_title=price_y_title,
+        height=chart_height,
+        enable_zoom=enable_zoom,
     )
 
     chart_columns = st.columns(2)
     with chart_columns[0]:
         st.subheader("Futures basis")
         line_chart(
-            basis_chart_rows(analysis),
+            basis_chart_rows(chart_analysis, basis_unit),
+            chart_key="basis",
             x="time",
-            y="basis_bps",
+            y="value",
             color=None,
-            y_title="Basis (bps)",
+            y_title=basis_y_title,
+            height=chart_height,
+            enable_zoom=enable_zoom,
         )
     with chart_columns[1]:
         st.subheader("Momentum")
+        momentum_rows = [
+            row
+            for row in momentum_chart_rows(chart_analysis)
+            if row["series"] in visible_series
+        ]
         line_chart(
-            momentum_chart_rows(analysis),
+            momentum_rows,
+            chart_key="momentum",
             x="time",
             y="value",
             color="series",
             y_title="Momentum (%)",
+            height=chart_height,
+            enable_zoom=enable_zoom,
         )
 
     st.subheader("Lead-lag return correlation")
     st.caption(
         "Positive lag tests whether futures lead spot; negative lag tests whether spot leads."
     )
-    st.vega_lite_chart(
-        spec={
-            "data": {"values": lag_chart_rows(analysis)},
-            "mark": {"type": "bar"},
-            "encoding": {
-                "x": {
-                    "field": "lag_seconds",
-                    "type": "quantitative",
-                    "title": "Lag (seconds)",
-                },
-                "y": {
-                    "field": "correlation",
-                    "type": "quantitative",
-                    "title": "Correlation",
-                },
-                "tooltip": [
-                    {"field": "lag_seconds", "title": "Lag (seconds)"},
-                    {"field": "correlation", "format": ".4f"},
-                    {"field": "observations"},
-                ],
-            },
-            "height": 260,
-        },
-        width="stretch",
+    lag_chart(
+        lag_chart_rows(visible_analysis),
+        height=chart_height,
+        fixed_scale=fixed_correlation_scale,
     )
 
     st.subheader("Downloads")
@@ -246,6 +673,11 @@ def render_query(database: Path, pairs_path: Path) -> None:
     start = time_columns[0].text_input("Start time", placeholder="2026-04-27T06:40:00+00:00")
     end = time_columns[1].text_input("End time", placeholder="2026-04-27T07:00:00+00:00")
     latest = st.checkbox("Newest first", value=True)
+    populated_only = st.checkbox(
+        "Only snapshots with price levels",
+        value=False,
+        help="Exclude empty snapshots created by order-book flush events.",
+    )
     limit = st.slider("Maximum snapshots", 1, 50, 5)
     if st.button("Run query", type="primary"):
         try:
@@ -257,6 +689,7 @@ def render_query(database: Path, pairs_path: Path) -> None:
                 end_ns=parse_time_ns(end) if end else None,
                 limit=limit,
                 latest=latest,
+                populated_only=populated_only,
             )
             snapshots = query_snapshots(SQLiteStore(database), query)
         except (OSError, ValueError) as error:
@@ -269,11 +702,27 @@ def render_query(database: Path, pairs_path: Path) -> None:
 
 
 def render_status(database: Path) -> None:
-    status = cached_status(str(database), database.stat().st_mtime_ns)
+    include_price_levels = st.checkbox(
+        "Calculate exact price-level count",
+        value=False,
+        help=(
+            "This scans the complete price-level table and can take a while on the full database."
+        ),
+    )
+    status = cached_status(
+        str(database),
+        database.stat().st_mtime_ns,
+        include_price_levels,
+    )
     metrics = st.columns(3)
     metrics[0].metric("Instruments", f"{status.instrument_count:,}")
     metrics[1].metric("Snapshots", f"{status.snapshot_count:,}")
-    metrics[2].metric("Price levels", f"{status.price_level_count:,}")
+    metrics[2].metric(
+        "Price levels",
+        "Not calculated"
+        if status.price_level_count is None
+        else f"{status.price_level_count:,}",
+    )
     st.table(
         [
             {"Property": "Database", "Value": str(database)},

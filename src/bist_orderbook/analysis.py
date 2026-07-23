@@ -92,23 +92,95 @@ def load_symbol_pairs(path: str | Path) -> tuple[SymbolPair, ...]:
     )
 
 
-def load_top_of_book(store: SQLiteStore, order_book_id: int) -> list[TopOfBook]:
-    sql = """
+def load_top_of_book(
+    store: SQLiteStore,
+    order_book_id: int,
+    *,
+    sample_interval_ns: int | None = None,
+) -> list[TopOfBook]:
+    if sample_interval_ns is not None and sample_interval_ns <= 0:
+        raise ValueError("sample interval must be positive")
+    if sample_interval_ns is None:
+        sql = """
         SELECT
             s.captured_at_ns,
-            MAX(CASE WHEN p.side = 'B' AND p.level = 1 THEN p.price END) AS bid,
-            MAX(CASE WHEN p.side = 'S' AND p.level = 1 THEN p.price END) AS ask,
-            MAX(CASE WHEN p.side = 'B' AND p.level = 1 THEN p.quantity END) AS bid_quantity,
-            MAX(CASE WHEN p.side = 'S' AND p.level = 1 THEN p.quantity END) AS ask_quantity
+            bid.price,
+            ask.price,
+            bid.quantity,
+            ask.quantity
         FROM snapshots AS s
-        JOIN price_levels AS p USING (snapshot_id)
+        JOIN price_levels AS bid
+          ON bid.snapshot_id = s.snapshot_id AND bid.side = 'B' AND bid.level = 1
+        JOIN price_levels AS ask
+          ON ask.snapshot_id = s.snapshot_id AND ask.side = 'S' AND ask.level = 1
         WHERE s.order_book_id = ?
-        GROUP BY s.snapshot_id
-        HAVING bid IS NOT NULL AND ask IS NOT NULL
         ORDER BY s.captured_at_ns
-    """
+        """
+        parameters: tuple[object, ...] = (order_book_id,)
+    else:
+        sql = """
+        WITH selected AS (
+            SELECT
+                MAX(s.snapshot_id) AS snapshot_id,
+                MAX(s.captured_at_ns) AS captured_at_ns
+            FROM snapshots AS s
+            WHERE s.order_book_id = ?
+            GROUP BY (s.captured_at_ns + ? - 1) / ?
+        )
+        SELECT
+            selected.captured_at_ns,
+            bid.price,
+            ask.price,
+            bid.quantity,
+            ask.quantity
+        FROM selected
+        LEFT JOIN price_levels AS bid
+          ON bid.snapshot_id = selected.snapshot_id AND bid.side = 'B' AND bid.level = 1
+        LEFT JOIN price_levels AS ask
+          ON ask.snapshot_id = selected.snapshot_id AND ask.side = 'S' AND ask.level = 1
+        ORDER BY selected.captured_at_ns
+        """
+        parameters = (order_book_id, sample_interval_ns, sample_interval_ns)
     with store.connect() as connection:
-        rows = connection.execute(sql, (order_book_id,)).fetchall()
+        rows = connection.execute(sql, parameters).fetchall()
+        if sample_interval_ns is not None:
+            fallback_sql = """
+                SELECT
+                    s.captured_at_ns,
+                    bid.price,
+                    ask.price,
+                    bid.quantity,
+                    ask.quantity
+                FROM snapshots AS s
+                JOIN price_levels AS bid
+                  ON bid.snapshot_id = s.snapshot_id AND bid.side = 'B' AND bid.level = 1
+                JOIN price_levels AS ask
+                  ON ask.snapshot_id = s.snapshot_id AND ask.side = 'S' AND ask.level = 1
+                WHERE s.order_book_id = ?
+                  AND s.captured_at_ns > ?
+                  AND s.captured_at_ns <= ?
+                ORDER BY s.captured_at_ns DESC
+                LIMIT 1
+            """
+            repaired_rows: list[tuple[object, ...]] = []
+            for row in rows:
+                if row[1] is not None and row[2] is not None:
+                    repaired_rows.append(row)
+                    continue
+                bucket_end_ns = (
+                    (int(row[0]) + sample_interval_ns - 1) // sample_interval_ns
+                ) * sample_interval_ns
+                fallback = connection.execute(
+                    fallback_sql,
+                    (
+                        order_book_id,
+                        bucket_end_ns - sample_interval_ns,
+                        bucket_end_ns,
+                    ),
+                ).fetchone()
+                if fallback is not None:
+                    repaired_rows.append(fallback)
+            rows = repaired_rows
     return [
         TopOfBook(
             timestamp_ns=int(row[0]),
@@ -244,9 +316,39 @@ def analyze_pair(
     momentum_periods: int,
     max_lag_steps: int,
 ) -> PairAnalysis:
+    interval_ns = interval_ms * 1_000_000
+    return analyze_top_of_books(
+        pair,
+        load_top_of_book(
+            store,
+            pair.spot_order_book_id,
+            sample_interval_ns=interval_ns,
+        ),
+        load_top_of_book(
+            store,
+            pair.future_order_book_id,
+            sample_interval_ns=interval_ns,
+        ),
+        interval_ms=interval_ms,
+        max_staleness_ms=max_staleness_ms,
+        momentum_periods=momentum_periods,
+        max_lag_steps=max_lag_steps,
+    )
+
+
+def analyze_top_of_books(
+    pair: SymbolPair,
+    spot: list[TopOfBook] | tuple[TopOfBook, ...],
+    future: list[TopOfBook] | tuple[TopOfBook, ...],
+    *,
+    interval_ms: int,
+    max_staleness_ms: int,
+    momentum_periods: int,
+    max_lag_steps: int,
+) -> PairAnalysis:
     observations = align_top_of_books(
-        load_top_of_book(store, pair.spot_order_book_id),
-        load_top_of_book(store, pair.future_order_book_id),
+        list(spot),
+        list(future),
         interval_ns=interval_ms * 1_000_000,
         max_staleness_ns=max_staleness_ms * 1_000_000,
         momentum_periods=momentum_periods,

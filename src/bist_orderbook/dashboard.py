@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import io
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from bist_orderbook.analysis import PairAnalysis
+from bist_orderbook.analysis import AlignedObservation, PairAnalysis
 from bist_orderbook.domain import BookSnapshot, Side
 from bist_orderbook.storage import SQLiteStore
 
@@ -15,24 +16,35 @@ from bist_orderbook.storage import SQLiteStore
 class DatabaseStatus:
     instrument_count: int
     snapshot_count: int
-    price_level_count: int
+    price_level_count: int | None
     first_timestamp: str | None
     last_timestamp: str | None
     database_size_bytes: int
 
 
-def database_status(path: str | Path) -> DatabaseStatus:
+def database_status(
+    path: str | Path, *, include_price_level_count: bool = False
+) -> DatabaseStatus:
     database_path = Path(path)
     store = SQLiteStore(database_path)
     with store.connect() as connection:
         instrument_count = int(connection.execute("SELECT COUNT(*) FROM instruments").fetchone()[0])
-        snapshot_count = int(connection.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0])
-        price_level_count = int(
-            connection.execute("SELECT COUNT(*) FROM price_levels").fetchone()[0]
+        snapshot_count = int(
+            connection.execute("SELECT COALESCE(MAX(snapshot_id), 0) FROM snapshots").fetchone()[0]
         )
-        first_timestamp, last_timestamp = connection.execute(
-            "SELECT MIN(captured_at), MAX(captured_at) FROM snapshots"
+        price_level_count = (
+            int(connection.execute("SELECT COUNT(*) FROM price_levels").fetchone()[0])
+            if include_price_level_count
+            else None
+        )
+        first_row = connection.execute(
+            "SELECT captured_at FROM snapshots ORDER BY captured_at_ns LIMIT 1"
         ).fetchone()
+        last_row = connection.execute(
+            "SELECT captured_at FROM snapshots ORDER BY captured_at_ns DESC LIMIT 1"
+        ).fetchone()
+        first_timestamp = first_row[0] if first_row is not None else None
+        last_timestamp = last_row[0] if last_row is not None else None
     return DatabaseStatus(
         instrument_count=instrument_count,
         snapshot_count=snapshot_count,
@@ -60,7 +72,32 @@ def snapshot_table(snapshot: BookSnapshot) -> list[dict[str, object | None]]:
     ]
 
 
-def price_chart_rows(analysis: PairAnalysis) -> list[dict[str, object]]:
+def timeline_index_at_or_before(timestamps_ns: list[int], target_ns: int) -> int:
+    """Return the nearest timeline index at or before a timestamp, clamped to the range."""
+
+    if not timestamps_ns:
+        raise ValueError("timeline has no timestamps")
+    return max(0, min(len(timestamps_ns) - 1, bisect_right(timestamps_ns, target_ns) - 1))
+
+
+def downsample_observations(
+    observations: tuple[AlignedObservation, ...],
+    max_points: int | None,
+) -> tuple[AlignedObservation, ...]:
+    """Uniformly reduce display points while preserving the first and last observations."""
+
+    if max_points is None or len(observations) <= max_points:
+        return observations
+    if max_points < 2:
+        raise ValueError("maximum chart points must be at least two")
+    last_index = len(observations) - 1
+    indices = [round(index * last_index / (max_points - 1)) for index in range(max_points)]
+    return tuple(observations[index] for index in indices)
+
+
+def price_chart_rows(
+    analysis: PairAnalysis, mode: str = "normalized"
+) -> list[dict[str, object]]:
     if not analysis.observations:
         return []
     spot_base = analysis.observations[0].spot.mid
@@ -68,26 +105,46 @@ def price_chart_rows(analysis: PairAnalysis) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for item in analysis.observations:
         timestamp = _timestamp(item.timestamp_ns)
+        if mode == "normalized":
+            spot_value = item.spot.mid / spot_base * 100
+            future_value = item.future.mid / future_base * 100
+        elif mode == "mid_price":
+            spot_value = item.spot.mid
+            future_value = item.future.mid
+        elif mode == "return":
+            spot_value = item.spot_return_pct
+            future_value = item.future_return_pct
+        else:
+            raise ValueError(f"unknown price chart mode: {mode}")
+        if spot_value is None or future_value is None:
+            continue
         rows.extend(
             (
                 {
                     "time": timestamp,
                     "series": analysis.pair.spot_symbol,
-                    "value": item.spot.mid / spot_base * 100,
+                    "value": spot_value,
                 },
                 {
                     "time": timestamp,
                     "series": analysis.pair.future_symbol,
-                    "value": item.future.mid / future_base * 100,
+                    "value": future_value,
                 },
             )
         )
     return rows
 
 
-def basis_chart_rows(analysis: PairAnalysis) -> list[dict[str, object]]:
+def basis_chart_rows(
+    analysis: PairAnalysis, unit: str = "bps"
+) -> list[dict[str, object]]:
+    if unit not in {"bps", "price"}:
+        raise ValueError(f"unknown basis chart unit: {unit}")
     return [
-        {"time": _timestamp(item.timestamp_ns), "basis_bps": item.basis_bps}
+        {
+            "time": _timestamp(item.timestamp_ns),
+            "value": item.basis_bps if unit == "bps" else item.basis,
+        }
         for item in analysis.observations
     ]
 

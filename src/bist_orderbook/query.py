@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -19,6 +20,7 @@ class SnapshotQuery:
     end_ns: int | None = None
     limit: int = 20
     latest: bool = False
+    populated_only: bool = False
 
     def __post_init__(self) -> None:
         if self.limit <= 0:
@@ -39,6 +41,20 @@ def parse_time_ns(value: str) -> int:
         return int(value)
     except ValueError:
         pass
+
+    match = re.fullmatch(
+        r"(?P<base>.+?)(?:\.(?P<fraction>\d{1,9}))?(?P<offset>Z|[+-]\d{2}:\d{2})",
+        value,
+    )
+    if match is not None:
+        offset = "+00:00" if match["offset"] == "Z" else match["offset"]
+        try:
+            timestamp = datetime.fromisoformat(f"{match['base']}{offset}")
+        except ValueError as error:
+            raise ValueError(f"invalid time value: {value}") from error
+        fraction_ns = int((match["fraction"] or "").ljust(9, "0"))
+        return int(timestamp.timestamp()) * 1_000_000_000 + fraction_ns
+
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
         timestamp = datetime.fromisoformat(normalized)
@@ -46,8 +62,7 @@ def parse_time_ns(value: str) -> int:
         raise ValueError(f"invalid time value: {value}") from error
     if timestamp.tzinfo is None:
         raise ValueError("ISO-8601 time values must include a UTC offset")
-    seconds = int(timestamp.timestamp())
-    return seconds * 1_000_000_000 + timestamp.microsecond * 1_000
+    raise ValueError(f"invalid time value: {value}")
 
 
 def query_snapshots(store: SQLiteStore, query: SnapshotQuery) -> list[BookSnapshot]:
@@ -68,6 +83,11 @@ def query_snapshots(store: SQLiteStore, query: SnapshotQuery) -> list[BookSnapsh
     if query.end_ns is not None:
         conditions.append("s.captured_at_ns <= ?")
         parameters.append(query.end_ns)
+    if query.populated_only:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM price_levels AS available "
+            "WHERE available.snapshot_id = s.snapshot_id)"
+        )
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     direction = "DESC" if query.latest else "ASC"

@@ -39,6 +39,14 @@ class SnapshotQueryTest(unittest.TestCase):
                 symbol="ASELS.E",
                 levels=(PriceLevel(1, Side.SELL, Decimal("53.30"), 50, 1),),
             ),
+            BookSnapshot(
+                timestamp=datetime(2026, 4, 27, 7, 2, tzinfo=UTC),
+                timestamp_ns=1_777_273_320_000_000_789,
+                sequence_number=300,
+                order_book_id=42,
+                symbol="ASELS.E",
+                levels=(),
+            ),
         ]
         self.store.write_snapshots(self.snapshots)
 
@@ -58,13 +66,24 @@ class SnapshotQueryTest(unittest.TestCase):
 
     def test_latest_reverses_snapshot_order(self) -> None:
         result = query_snapshots(self.store, SnapshotQuery(order_book_id=42, latest=True))
-        self.assertEqual([item.sequence_number for item in result], [200, 100])
+        self.assertEqual([item.sequence_number for item in result], [300, 200, 100])
+
+    def test_populated_only_skips_empty_book_flush(self) -> None:
+        result = query_snapshots(
+            self.store,
+            SnapshotQuery(order_book_id=42, latest=True, populated_only=True, limit=1),
+        )
+        self.assertEqual([item.sequence_number for item in result], [200])
 
     def test_parses_iso_and_nanosecond_times(self) -> None:
         self.assertEqual(parse_time_ns("1777273200000000123"), 1_777_273_200_000_000_123)
         self.assertEqual(
             parse_time_ns("2026-04-27T07:00:00.000123+00:00"),
             1_777_273_200_000_123_000,
+        )
+        self.assertEqual(
+            parse_time_ns("2026-04-27T07:02:00.000000789Z"),
+            1_777_273_320_000_000_789,
         )
         with self.assertRaisesRegex(ValueError, "must include a UTC offset"):
             parse_time_ns("2026-04-27T07:00:00")

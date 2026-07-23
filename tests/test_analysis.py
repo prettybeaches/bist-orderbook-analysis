@@ -1,6 +1,7 @@
 import csv
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -10,9 +11,12 @@ from bist_orderbook.analysis import (
     TopOfBook,
     align_top_of_books,
     calculate_lag_correlations,
+    load_top_of_book,
     write_analysis_summary,
     write_pair_reports,
 )
+from bist_orderbook.domain import BookSnapshot, PriceLevel, Side
+from bist_orderbook.storage import SQLiteStore
 
 
 def book(second: int, mid: str) -> TopOfBook:
@@ -72,6 +76,47 @@ class PairAnalysisTest(unittest.TestCase):
                 rows = list(csv.DictReader(source))
             self.assertEqual(rows[0]["spot_symbol"], "ASELS.E")
             self.assertEqual(rows[0]["observations"], "6")
+
+    def test_sampled_top_of_book_matches_alignment_ticks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = SQLiteStore(Path(temporary_directory) / "books.db")
+            store.upsert_instruments(((42, "ASELS.E", "EQUITY", None, None),))
+            timestamps_ns = (50_000_000, 90_000_000, 100_000_000, 150_000_000, 190_000_000, 250_000_000)
+            snapshots = tuple(
+                BookSnapshot(
+                    timestamp=datetime.fromtimestamp(timestamp_ns / 1_000_000_000, UTC),
+                    timestamp_ns=timestamp_ns,
+                    sequence_number=index,
+                    order_book_id=42,
+                    symbol="ASELS.E",
+                    levels=(
+                        PriceLevel(1, Side.BUY, Decimal(index), 100, 1),
+                        PriceLevel(1, Side.SELL, Decimal(index + 1), 100, 1),
+                    ),
+                )
+                for index, timestamp_ns in enumerate(timestamps_ns, start=1)
+            )
+            store.write_snapshots(snapshots)
+
+            full = load_top_of_book(store, 42)
+            sampled = load_top_of_book(store, 42, sample_interval_ns=100_000_000)
+
+        self.assertEqual([item.timestamp_ns for item in sampled], [100_000_000, 190_000_000, 250_000_000])
+        full_aligned = align_top_of_books(
+            full,
+            full,
+            interval_ns=100_000_000,
+            max_staleness_ns=100_000_000,
+            momentum_periods=1,
+        )
+        sampled_aligned = align_top_of_books(
+            sampled,
+            sampled,
+            interval_ns=100_000_000,
+            max_staleness_ns=100_000_000,
+            momentum_periods=1,
+        )
+        self.assertEqual(full_aligned, sampled_aligned)
 
 
 if __name__ == "__main__":
