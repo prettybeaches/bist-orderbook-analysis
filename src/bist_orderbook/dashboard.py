@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from bist_orderbook.analysis import AlignedObservation, PairAnalysis
+from bist_orderbook.analysis import AlignedObservation, PairAnalysis, SymbolPair
 from bist_orderbook.domain import BookSnapshot, Side
 from bist_orderbook.storage import SQLiteStore
 
@@ -20,6 +20,72 @@ class DatabaseStatus:
     first_timestamp: str | None
     last_timestamp: str | None
     database_size_bytes: int
+
+
+def database_symbols(path: str | Path) -> tuple[str, ...]:
+    """Return every instrument with snapshots in the selected database."""
+
+    store = SQLiteStore(path)
+    with store.connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT i.symbol
+            FROM instruments AS i
+            WHERE EXISTS (
+                SELECT 1
+                FROM snapshots AS s
+                WHERE s.order_book_id = i.order_book_id
+                LIMIT 1
+            )
+            ORDER BY i.symbol
+            """
+        ).fetchall()
+    return tuple(str(row[0]) for row in rows)
+
+
+def database_pairs(path: str | Path) -> tuple[SymbolPair, ...]:
+    """Discover analyzable spot/futures relationships in the selected database."""
+
+    store = SQLiteStore(path)
+    with store.connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                spot.symbol,
+                spot.order_book_id,
+                future.symbol,
+                future.order_book_id,
+                COALESCE(future.expiry_date, '')
+            FROM instruments AS future
+            JOIN instruments AS spot
+              ON spot.symbol = future.underlying_symbol
+             AND spot.market = 'EQUITY'
+            WHERE future.market = 'FUTURE'
+              AND EXISTS (
+                  SELECT 1
+                  FROM snapshots AS spot_snapshot
+                  WHERE spot_snapshot.order_book_id = spot.order_book_id
+                  LIMIT 1
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM snapshots AS future_snapshot
+                  WHERE future_snapshot.order_book_id = future.order_book_id
+                  LIMIT 1
+              )
+            ORDER BY spot.symbol, future.expiry_date, future.symbol
+            """
+        ).fetchall()
+    return tuple(
+        SymbolPair(
+            spot_symbol=str(row[0]),
+            spot_order_book_id=int(row[1]),
+            future_symbol=str(row[2]),
+            future_order_book_id=int(row[3]),
+            expiration_date=str(row[4]),
+        )
+        for row in rows
+    )
 
 
 def database_status(

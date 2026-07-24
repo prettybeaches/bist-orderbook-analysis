@@ -40,7 +40,7 @@ Post-run validation results:
 
 - SQLite `PRAGMA quick_check` returns `ok`.
 - SQLite `PRAGMA foreign_key_check` returns zero violations.
-- All 35 automated tests pass.
+- All 36 automated tests pass.
 - Ruff reports no violations.
 
 The sequence gaps and rejected book events remain explicit feed-quality limitations. The larger

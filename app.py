@@ -20,14 +20,15 @@ from bist_orderbook.analysis import (
     PairAnalysis,
     analyze_top_of_books,
     calculate_lag_correlations,
-    load_symbol_pairs,
     summary_row,
 )
 from bist_orderbook.analysis_cache import load_cached_top_of_book
 from bist_orderbook.dashboard import (
     analysis_csv,
     basis_chart_rows,
+    database_pairs,
     database_status,
+    database_symbols,
     downsample_observations,
     lag_chart_rows,
     momentum_chart_rows,
@@ -44,8 +45,15 @@ st.set_page_config(page_title="BIST Order Book Analysis", page_icon="📈", layo
 
 
 @st.cache_data(show_spinner=False)
-def cached_pairs(path: str):
-    return load_symbol_pairs(path)
+def cached_database_pairs(path: str, modified_ns: int):
+    del modified_ns
+    return database_pairs(path)
+
+
+@st.cache_data(show_spinner=False)
+def cached_database_symbols(path: str, modified_ns: int):
+    del modified_ns
+    return database_symbols(path)
 
 
 @st.cache_data(show_spinner=False)
@@ -307,10 +315,23 @@ def format_timestamp_ns(timestamp_ns: int) -> str:
     return f"{timestamp}.{nanoseconds:09d}Z"
 
 
-def render_dashboard(database: Path, pairs_path: Path) -> None:
-    pairs = cached_pairs(str(pairs_path))
+def render_dashboard(database: Path) -> None:
+    modified_ns = database.stat().st_mtime_ns
+    pairs = cached_database_pairs(str(database), modified_ns)
+    if not pairs:
+        st.warning(
+            "No spot/futures relationships with snapshots were found in the selected database."
+        )
+        return
     pair_labels = {f"{pair.spot_symbol} / {pair.future_symbol}": pair for pair in pairs}
-    selected_label = st.sidebar.selectbox("Spot / futures pair", pair_labels)
+    st.sidebar.caption(
+        f"{len(pairs):,} analyzable spot/futures relationships found in the selected database."
+    )
+    selected_label = st.sidebar.selectbox(
+        "Spot / futures pair",
+        pair_labels,
+        key=f"database_pair_{database.resolve()}_{modified_ns}",
+    )
     pair = pair_labels[selected_label]
     interval_ms = st.sidebar.select_slider(
         "Alignment interval",
@@ -328,7 +349,6 @@ def render_dashboard(database: Path, pairs_path: Path) -> None:
     max_lag_steps = st.sidebar.slider("Maximum lead-lag steps", 1, 20, 5)
     analysis_scope = f"{pair.name}_{interval_ms}_{max_staleness_ms}_{momentum_periods}"
 
-    modified_ns = database.stat().st_mtime_ns
     analysis = cached_analysis(
         str(database),
         modified_ns,
@@ -639,11 +659,8 @@ def optional_integer(value: str, label: str) -> int | None:
         raise ValueError(f"{label} must be an integer") from error
 
 
-def render_query(database: Path, pairs_path: Path) -> None:
-    pairs = cached_pairs(str(pairs_path))
-    symbols = sorted(
-        {symbol for pair in pairs for symbol in (pair.spot_symbol, pair.future_symbol)}
-    )
+def render_query(database: Path) -> None:
+    symbols = cached_database_symbols(str(database), database.stat().st_mtime_ns)
     symbol = st.selectbox("Symbol", ["All symbols", *symbols])
     filter_columns = st.columns(2)
     order_book_text = filter_columns[0].text_input("Order Book ID")
@@ -716,22 +733,20 @@ st.title("BIST Order Book Analysis")
 st.caption("10-level equity and futures order books reconstructed from BISTECH ITCH market data")
 
 database_candidates = (
+    Path("data/processed/orderbook-bist50-full.db"),
     Path("data/processed/orderbook-full.db"),
     Path("data/processed/orderbook-balanced.db"),
     Path("data/processed/orderbook.db"),
 )
 default_database = next((path for path in database_candidates if path.exists()), database_candidates[-1])
 database = Path(st.sidebar.text_input("SQLite database", str(default_database)))
-pairs_path = Path(st.sidebar.text_input("Pair configuration", "config/symbol_pairs.csv"))
 page = st.sidebar.radio("View", ("Pair dashboard", "Snapshot query", "Data status"))
 
 if not database.exists():
     st.error(f"Database not found: {database}")
-elif not pairs_path.exists():
-    st.error(f"Pair configuration not found: {pairs_path}")
 elif page == "Pair dashboard":
-    render_dashboard(database, pairs_path)
+    render_dashboard(database)
 elif page == "Snapshot query":
-    render_query(database, pairs_path)
+    render_query(database)
 else:
     render_status(database)

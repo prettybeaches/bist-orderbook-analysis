@@ -4,7 +4,7 @@ A PCAP-based data pipeline that replays BIST market data, reconstructs 10-level 
 equity and derivatives instruments, stores queryable snapshots, and analyzes related spot/futures
 pairs.
 
-Current release: **v0.3.0 “Complete Horizon”**
+Current release: **v0.3.1 “Adaptive Universe”**
 
 ## Project scope
 
@@ -128,15 +128,17 @@ Launch the interactive dashboard:
 streamlit run app.py
 ```
 
-The dashboard prefers `data/processed/orderbook-full.db`, then falls back to the balanced sample and
-`data/processed/orderbook.db`. It provides a spot/futures analysis view, an interactive snapshot
-query, database status metrics, and CSV downloads. The pair view can display the latest populated
-books, the absolute latest events (including closing flushes), or synchronized books selected from
-the analysis timeline. The timeline accepts exact ISO-8601 or Unix-nanosecond timestamp searches
-and can include empty book-flush snapshots. Chart controls allow users to select the price and basis
-measures, visible instruments, time window, chart height, zoom behavior, and correlation scale.
-Moving the pointer anywhere across a chart shows the nearest timestamp and values. Database and
-pair-configuration paths can be changed in the sidebar.
+The dashboard prefers `data/processed/orderbook-bist50-full.db`, then falls back to the personal
+full database, balanced sample, and default database. It provides a spot/futures analysis view, an
+interactive snapshot query, database status metrics, and CSV downloads. Symbols and analyzable
+spot/futures relationships are discovered from the currently selected database, so changing the
+database refreshes both query options and pair calculations automatically. The pair view can
+display the latest populated books, the absolute latest events (including closing flushes), or
+synchronized books selected from the analysis timeline. The timeline accepts exact ISO-8601 or
+Unix-nanosecond timestamp searches and can include empty book-flush snapshots. Chart controls allow
+users to select the price and basis measures, visible instruments, time window, chart height, zoom
+behavior, and correlation scale. Moving the pointer anywhere across a chart shows the nearest
+timestamp and values.
 
 For responsive exploration of the full database, top-of-book rows are reduced inside SQLite at the
 selected alignment interval and stored in `data/processed/.cache/`. Cache keys include the database

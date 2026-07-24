@@ -15,7 +15,9 @@ from bist_orderbook.analysis import (
 from bist_orderbook.dashboard import (
     analysis_csv,
     basis_chart_rows,
+    database_pairs,
     database_status,
+    database_symbols,
     downsample_observations,
     lag_chart_rows,
     nearest_hover_parameter,
@@ -56,6 +58,37 @@ class DashboardHelperTest(unittest.TestCase):
         self.assertEqual(rows[0]["Bid price"], 53.25)
         self.assertEqual(rows[0]["Ask quantity"], 120)
         self.assertEqual(len(rows), 10)
+
+    def test_discovers_symbols_and_pairs_from_selected_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "orderbook.db"
+            store = SQLiteStore(path)
+            store.upsert_instruments(
+                (
+                    (42, "ASELS.E", "EQUITY", None, None),
+                    (84, "F_ASELS0426", "FUTURE", "ASELS.E", "20260430"),
+                    (85, "F_ASELS0526", "FUTURE", "ASELS.E", "20260525"),
+                    (99, "EMPTY.E", "EQUITY", None, None),
+                )
+            )
+            future_snapshot = BookSnapshot(
+                timestamp=self.snapshot.timestamp,
+                timestamp_ns=self.snapshot.timestamp_ns,
+                sequence_number=11,
+                order_book_id=84,
+                symbol="F_ASELS0426",
+                levels=self.snapshot.levels,
+            )
+            store.write_snapshots((self.snapshot, future_snapshot))
+
+            symbols = database_symbols(path)
+            pairs = database_pairs(path)
+
+        self.assertEqual(symbols, ("ASELS.E", "F_ASELS0426"))
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0].spot_symbol, "ASELS.E")
+        self.assertEqual(pairs[0].future_symbol, "F_ASELS0426")
+        self.assertEqual(pairs[0].expiration_date, "20260430")
 
     def test_chart_rows_and_download_csv(self) -> None:
         spot = [

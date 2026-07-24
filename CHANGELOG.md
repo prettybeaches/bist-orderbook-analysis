@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.1 “Adaptive Universe”
+
+- Discover dashboard symbols directly from the currently selected SQLite database.
+- Discover every analyzable spot/futures relationship stored in that database.
+- Refresh pair calculations and persistent cache selection when the database changes.
+- Exclude instruments without snapshots and futures whose underlying spot book is unavailable.
+- Prefer the expanded BIST50 database automatically when it is present.
+
 ## v0.3.0 “Complete Horizon”
 
 - Add the dated Q2 2026 BIST50 constituent configuration used by the April 27 capture.
