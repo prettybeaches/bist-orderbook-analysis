@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 from bist_orderbook.analysis import (
@@ -21,6 +22,7 @@ from bist_orderbook.query import (
     query_snapshots,
     write_snapshot_csv,
 )
+from bist_orderbook.scope import build_front_month_scope, write_symbol_pairs
 from bist_orderbook.storage import SQLiteStore
 
 
@@ -77,6 +79,35 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1_000_000,
         help="Print progress after this many packets; use 0 to disable",
+    )
+
+    build_pairs = subparsers.add_parser(
+        "build-pairs",
+        help="Match dated index constituents to their front-month futures contracts",
+    )
+    build_pairs.add_argument(
+        "--constituents",
+        type=Path,
+        default=Path("config/bist50_2026_q2.csv"),
+        help="Dated index constituent CSV path",
+    )
+    build_pairs.add_argument(
+        "--catalog",
+        type=Path,
+        default=Path("data/processed/instruments.csv"),
+        help="Instrument catalog CSV path",
+    )
+    build_pairs.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        required=True,
+        help="Trading date in YYYY-MM-DD format",
+    )
+    build_pairs.add_argument(
+        "--output",
+        type=Path,
+        default=Path("config/bist50_front_month_pairs.csv"),
+        help="Destination pair CSV path",
     )
 
     ingest = subparsers.add_parser(
@@ -256,6 +287,22 @@ def main(argv: list[str] | None = None) -> int:
             f"replayed packets: {result.stats.duplicate_or_replayed_packets:,}; "
             f"malformed payloads: {result.stats.malformed_payloads:,}"
         )
+        return 0
+    if args.command == "build-pairs":
+        result = build_front_month_scope(
+            args.constituents,
+            args.catalog,
+            as_of=args.as_of,
+        )
+        write_symbol_pairs(args.output, result.pairs)
+        print(
+            f"Pair configuration written: {args.output}; "
+            f"constituents={result.constituent_count:,}; "
+            f"eligible pairs={len(result.pairs):,}; "
+            f"without captured equity futures={len(result.unavailable_symbols):,}"
+        )
+        if result.unavailable_symbols:
+            print(f"Unavailable: {', '.join(result.unavailable_symbols)}")
         return 0
     if args.command == "ingest":
         positive_values = {

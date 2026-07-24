@@ -1,5 +1,54 @@
 # Full-Capture Validation
 
+## Expanded BIST50 front-month validation
+
+Release v0.3.0 expands reconstruction from the personal 10-pair analysis set to every Q2 2026
+BIST50 constituent with an equity futures contract in the captured instrument catalog. The dated
+scope resolves to 41 spot/futures pairs and 82 order books.
+
+The complete archive was replayed into `data/processed/orderbook-bist50-full.db`:
+
+```bash
+PYTHONPATH=src python -m bist_orderbook ingest \
+  data/raw/itch-pri-20260427.tar.xz \
+  --pairs config/bist50_front_month_20260427.csv \
+  --catalog data/processed/instruments.csv \
+  --database data/processed/orderbook-bist50-full.db \
+  --snapshot-every 1 \
+  --batch-size 5000
+```
+
+| Measurement | Result |
+| --- | ---: |
+| Capture packets | 112,943,179 |
+| Selected ITCH messages | 66,018,658 |
+| Reconstructed snapshots | 65,986,550 |
+| Selected instruments | 82 |
+| Equity instruments | 41 |
+| Futures instruments | 41 |
+| Database size | 74,492,702,720 bytes |
+| Decode errors | 0 |
+| Replayed messages | 0 |
+| Sequence gaps | 11 |
+| Missing MoldUDP64 messages | 119,690 |
+| Rejected book events | 247 |
+
+The expanded snapshot range is `2026-04-27T04:30:00.099169+00:00` through
+`2026-04-27T15:17:23.220204+00:00`. All 82 configured instruments have stored snapshots.
+
+Post-run validation results:
+
+- SQLite `PRAGMA quick_check` returns `ok`.
+- SQLite `PRAGMA foreign_key_check` returns zero violations.
+- All 35 automated tests pass.
+- Ruff reports no violations.
+
+The sequence gaps and rejected book events remain explicit feed-quality limitations. The larger
+book-error count relative to the personal 10-pair replay reflects the broader 82-book scope; no
+decoder errors were recorded.
+
+## Personal 10-pair analysis validation
+
 ## Run configuration
 
 The complete `itch-pri-20260427.tar.xz` archive was replayed without a packet or snapshot limit.
@@ -83,4 +132,4 @@ correlation for every selected pair occurs at zero seconds under this configurat
 - All 10 configured pairs appear in the summary.
 - SQLite `PRAGMA quick_check` returns `ok`.
 - SQLite reports zero foreign-key violations.
-- All 27 automated tests and Ruff checks pass.
+- All generated reports remain non-empty and valid; current automated tests and Ruff checks pass.

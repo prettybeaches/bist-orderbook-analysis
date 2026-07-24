@@ -4,7 +4,7 @@ A PCAP-based data pipeline that replays BIST market data, reconstructs 10-level 
 equity and derivatives instruments, stores queryable snapshots, and analyzes related spot/futures
 pairs.
 
-Current release: **v0.2.1 “Steady Pulse”**
+Current release: **v0.3.0 “Complete Horizon”**
 
 ## Project scope
 
@@ -66,17 +66,32 @@ PYTHONPATH=src python -m bist_orderbook list-instruments \
   --limit 8000000
 ```
 
-The initial 10 spot/front-month futures selections are stored in
-`config/symbol_pairs.csv`. They can be changed before full order book ingestion.
+The personal 10 spot/front-month futures selections used for relationship analysis are stored in
+`config/symbol_pairs.csv`.
 
-Replay the selected 20 order books and persist every event snapshot:
+Generate the complete front-month ingestion scope for BIST50 constituents valid on the capture
+date:
+
+```bash
+PYTHONPATH=src python -m bist_orderbook build-pairs \
+  --constituents config/bist50_2026_q2.csv \
+  --catalog data/processed/instruments.csv \
+  --as-of 2026-04-27 \
+  --output config/bist50_front_month_20260427.csv
+```
+
+This produces 41 eligible spot/futures pairs, or 82 selected order books. Nine Q2 2026 BIST50
+members do not have an equity futures contract in the captured instrument catalog. See
+`docs/requirements-traceability.md` for the dated scope and official sources.
+
+Replay the complete 82-book scope and persist every event snapshot:
 
 ```bash
 PYTHONPATH=src python -m bist_orderbook ingest \
   data/raw/itch-pri-20260427.tar.xz \
-  --pairs config/symbol_pairs.csv \
+  --pairs config/bist50_front_month_20260427.csv \
   --catalog data/processed/instruments.csv \
-  --database data/processed/orderbook.db
+  --database data/processed/orderbook-bist50-full.db
 ```
 
 For a smaller sampled database, use `--snapshot-every 100`. Bounded validation runs can also use
@@ -169,6 +184,7 @@ Implemented:
 - Core BISTECH ITCH 2112 message decoding (`T`, `R`, `A`, `E`, `C`, `D`, and `Y`).
 - Multi-channel instrument discovery with sequence-gap and replay detection.
 - A real-data instrument catalog and an editable 10-pair configuration.
+- A dated Q2 2026 BIST50 scope and reproducible 41-pair front-month ingestion configuration.
 - Protocol-independent event models and a 10-level order book engine.
 - Multicast-only selected-book replay with exact nanosecond timestamps.
 - Transactional SQLite batch writes for snapshots and their 10-level price tables.
@@ -178,7 +194,8 @@ Implemented:
 - Separate CSV and SVG outputs for every pair and analysis category.
 - A Streamlit dashboard with pair charts, 10-level book tables, snapshot queries, data status, and
   CSV downloads.
-- Complete-capture validation over 112.9 million packets and 23.6 million reconstructed snapshots.
+- Complete-capture validation over 112.9 million packets and 66.0 million expanded-scope
+  reconstructed snapshots.
 
 Full-capture measurements and known feed gaps are documented in
 `docs/full-capture-validation.md`.
